@@ -108,6 +108,69 @@ __global__ void matmul_scale(const float* A, const float* B, float* C, int M, in
     }
 }
 
+/*
+*   Kernel 3: Row-wise softmax
+* @brief Calculates the softmax for each row of the input matrix
+* @note Softmax = exp(x_i) / sum(exp(x_j))
+*       Implemented in a numerically stable way by subtracting the
+*       max value of the row from each element
+*       Each thread processes one row
+* @param M: number of rows, N: length of rows
+*/
+
+__global__ void softmax(float* data, int M, int N) {
+    int row = blockIdx.x;
+    if (row >= M) return;
+
+    // Shared memory to hold current row and intermediate values
+    extern __shared__ float sdata[];
+
+    // Find the maximum value in a row
+    float max_val = -1e20f; // init with a very small number
+    // Each thread loads one element from the row and finds its local max
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        max_val = fmaxf(max_val, data[row * N + i]);
+    }
+    sdata[threadIdx.x] = max_val;
+
+    __syncthreads();
+
+    // Reduce within the block to find the true max
+    for (int i = blockDim.x / 2; i > 0; i >>= 1) {
+        if (threadIdx.x < i) {
+            sdata[threadIdx.x] = fmaxf(sdata[threadIdx.x], sdata[threadIdx.x + i]);
+        }
+        __syncthreads();
+    }
+
+    max_val = sdata[0];
+
+    // Calculate the sum of exponentials (parallel reduction)
+    float sum = 0.0f;
+    for (int i = threadIdx.x; i < N; i++) {
+        sum += expf(data[row * N + i] - max_val);
+    }
+    sdata[threadIdx.x] = sum;
+    __syncthreads();
+
+    // Reduce within the block to get the total sum
+    for (int i = blockDim.x / 2; i > 0; i >>= 1) {
+        if (threadIdx.x < i) {
+            sdata[threadIdx.x] += sdata[threadIdx.x + i];
+        }
+        __syncthreads();
+    } 
+
+    sum = sdata[0];
+
+    // Normalize and write the block
+    for (int i = threadIdx.x; i < N; i += blockDim.x) {
+        data[row * N + i] = expf(data[row * N + i] - max_val) / sum;
+    }
+
+}
+
+
 // driver 
 int main() {
     constexpr int batch_size = 4;
