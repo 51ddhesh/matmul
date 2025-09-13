@@ -167,8 +167,110 @@ __global__ void softmax(float* data, int M, int N) {
     for (int i = threadIdx.x; i < N; i += blockDim.x) {
         data[row * N + i] = expf(data[row * N + i] - max_val) / sum;
     }
+} 
+
+
+
+/*
+*   Kernel 4: Final Matmul (P_softmax * V)
+* @brief Second tiled matmul, similar to kernel 2
+* @note Has no scaling factor unlike the previous matmul kernel
+*       Computes P_softmax * V
+*/
+__global__ void matmul(const float* A, const float* B, float* C, int M, int N, int K) {
+    // A: P_softmax (M * K)
+    // B: V (K * N)
+    // C: Output (M * N)
+
+    __shared__ float tileA[TILE_DIM][TILE_DIM];
+    __shared__ float tileB[TILE_DIM][TILE_DIM];
+
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    int row = by * TILE_DIM + ty;
+    int col = bx * TILE_DIM + tx;
+
+    float acc = 0.0f;
+
+    for (int i = 0; i < (K + TILE_DIM - 1) / TILE_DIM; i++) {
+        if (row < M && (i * TILE_DIM + tx) < K) {
+            tileA[ty][tx] = A[row * K + (i * TILE_DIM + tx)];
+        } else tileA[ty][tx] = 0.0f;
+
+        if ((i * TILE_DIM + ty) < K && col < N) {
+            tileB[ty][tx] = B[(i * TILE_DIM + ty) * N + col];
+        } else tileB[ty][tx] = 0.0f;
+        
+        __syncthreads();
+
+        for (int i = 0; i < TILE_DIM; ++i) {
+            acc += tileA[ty][i] * tileB[i][tx];
+        }
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        C[row * N + col] = acc;
+    }
 
 }
+
+/*
+* @brief CPU implementation of attention for verification 
+*/
+void cpu_attn(const float* q, const float* k, const float* v, float* output,
+        int batch_size, int seq_len, int d_k, int d_v
+        ) {
+    std::cout << "\nRunning CPU attention for verification..." << std::endl;
+    float scale = 1.0f / sqrtf(static_cast<float>(d_k));
+
+    for (int b = 0; b < batch_size; ++b) {
+        // P = Q * K^T
+        std::vector<float> p(seq_len * seq_len);
+        for (int i = 0; i < seq_len; ++i) {
+            for (int j = 0; j < seq_len; ++j) {
+                float dot = 0.0f;
+                for (int l = 0; l < d_k; ++l) {
+                    dot += q[b * seq_len * d_k + i * d_k + l] * k[b * seq_len * d_k + j * d_k + l];
+                }
+                p[i * seq_len + j] = dot * scale;
+            }
+        }
+        
+        // Softmax(P)
+        for (int i = 0; i < seq_len; ++i) {
+            float max_val = -1e20f;
+            for (int j = 0; j < seq_len; ++j) {
+                max_val = fmaxf(max_val, p[i * seq_len + j]);
+            }
+            float sum = 0.0f;
+            for (int j = 0; j < seq_len; ++j) {
+                p[i * seq_len + j] = expf(p[i * seq_len + j] - max_val);
+                sum += p[i * seq_len + j];
+            }
+            for (int j = 0; j < seq_len; ++j) {
+                p[i * seq_len + j] /= sum;
+            }
+        }
+
+        // Output = P * V
+        for (int i = 0; i < seq_len; ++i) {
+            for (int j = 0; j < d_v; ++j) {
+                float acc = 0.0f;
+                for (int l = 0; l < seq_len; ++l) {
+                    acc += p[i * seq_len + l] * v[b * seq_len * d_v + l * d_v + j];
+                }
+                output[b * seq_len * d_v + i * d_v + j] = acc;
+            }
+        }
+    }
+    std::cout << "CPU attention finished." << std::endl;
+}
+
+
 
 
 // driver 
@@ -178,4 +280,6 @@ int main() {
     constexpr int d_k        = 64;   // Dimension of keys and queries
     constexpr int d_v        = 64;   // Dimension of values
     assert(d_k == d_v); // sanity check
+
+    return 0;
 }
